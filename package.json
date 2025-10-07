@@ -1,0 +1,12 @@
+{
+  "name": "yenkasa-caller-server",
+  "version": "1.0.0",
+  "main": "caller.server.js",
+  "type": "commonjs",
+  "dependencies": {
+    "ws": "^8.15.1"
+  },
+  "scripts": {
+    "start": "node caller.server.js"
+  }
+}
