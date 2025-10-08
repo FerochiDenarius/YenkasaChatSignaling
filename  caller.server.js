@@ -66,6 +66,8 @@ wss.on("connection", (socket, req) => {
           // Optional: log unknown types
           console.log(`Unknown message type: ${type}`);
       }
+// At the section where you mount other routes
+safeMount("/api/dailyco", "./routes/dailyco.routes.js");
 
       // Forward message if callee exists
       if (callee) {
