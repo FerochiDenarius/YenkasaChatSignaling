@@ -1,4 +1,5 @@
 // caller.server.js
+require('dotenv').config(); // Load .env
 const express = require("express");
 const bodyParser = require("body-parser");
 const http = require("http");
@@ -10,16 +11,17 @@ const path = require("path");
 const app = express();
 app.use(bodyParser.json());
 
-// Mount Daily.co routes
+// --- Mount Daily.co routes ---
 const dailycoRoutes = require("./routes/dailyco.routes.js");
 app.use("/api/dailyco", dailycoRoutes);
 
 // --- Create HTTP server for WebSocket and Express ---
-const server = http.createServer(app); // Attach Express app
+const server = http.createServer(app); // Express app attached here
 const wss = new WebSocket.Server({ server });
 
 const clients = new Map(); // userId -> { socket, inCallWith }
 
+// Helper to send messages to a client
 function sendTo(userId, messageObj) {
   const client = clients.get(userId);
   if (client && client.socket.readyState === WebSocket.OPEN) {
@@ -68,7 +70,7 @@ wss.on("connection", (socket, req) => {
 
         case "ANSWER":
         case "CANDIDATE":
-          // Forward handled below
+          // Forward below
           break;
 
         case "CALL_ENDED":
