@@ -1,8 +1,21 @@
-const WebSocket = require("ws");
+// caller.server.js
+const express = require("express");
+const bodyParser = require("body-parser");
 const http = require("http");
+const WebSocket = require("ws");
 const url = require("url");
+const path = require("path");
 
-const server = http.createServer();
+// --- Create Express app for API routes ---
+const app = express();
+app.use(bodyParser.json());
+
+// Mount Daily.co routes
+const dailycoRoutes = require("./routes/dailyco.routes.js");
+app.use("/api/dailyco", dailycoRoutes);
+
+// --- Create HTTP server for WebSocket and Express ---
+const server = http.createServer(app); // Attach Express app
 const wss = new WebSocket.Server({ server });
 
 const clients = new Map(); // userId -> { socket, inCallWith }
@@ -14,6 +27,7 @@ function sendTo(userId, messageObj) {
   }
 }
 
+// --- WebSocket logic ---
 wss.on("connection", (socket, req) => {
   const params = new URLSearchParams(url.parse(req.url).query);
   const userId = params.get("userId");
@@ -54,7 +68,7 @@ wss.on("connection", (socket, req) => {
 
         case "ANSWER":
         case "CANDIDATE":
-          // Nothing special, just forward
+          // Forward handled below
           break;
 
         case "CALL_ENDED":
@@ -63,13 +77,10 @@ wss.on("connection", (socket, req) => {
           break;
 
         default:
-          // Optional: log unknown types
           console.log(`Unknown message type: ${type}`);
       }
-// At the section where you mount other routes
-safeMount("/api/dailyco", "./routes/dailyco.routes.js");
 
-      // Forward message if callee exists
+      // Forward signaling message if callee exists
       if (callee) {
         sendTo(targetId, { ...data, fromUserId: userId });
       }
@@ -92,5 +103,6 @@ safeMount("/api/dailyco", "./routes/dailyco.routes.js");
   });
 });
 
+// --- Start server ---
 const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => console.log(`🚀 Signaling Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));

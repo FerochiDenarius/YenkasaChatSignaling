@@ -4,6 +4,8 @@
   "main": "caller.server.js",
   "type": "commonjs",
   "dependencies": {
+    "body-parser": "^2.2.0",
+    "express": "^5.1.0",
     "ws": "^8.15.1"
   },
   "scripts": {
