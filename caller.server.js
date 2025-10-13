@@ -1,4 +1,4 @@
-require('dotenv').config();
+require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const http = require("http");
@@ -7,28 +7,29 @@ const url = require("url");
 const path = require("path");
 const axios = require("axios");
 
-// --- Create Express app for API routes ---
+// --- Initialize Express ---
 const app = express();
 app.use(bodyParser.json());
 
-// --- Mount Daily.co routes ---
+// --- Daily.co routes ---
 const dailycoRoutes = require("./routes/dailyco.routes.js");
 app.use("/api/dailyco", dailycoRoutes);
 
-// --- Create HTTP server for WebSocket + Express ---
+// --- HTTP + WebSocket Server ---
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const clients = new Map(); // userId -> { socket, inCallWith }
+// --- Client Registry (key = user._id) ---
+const clients = new Map(); // _id -> { socket, inCallWith }
 
-// --- Helper for consistent logging ---
+// --- Logging Helper ---
 function logEvent(tag, message, data) {
   const time = new Date().toISOString();
   if (data) console.log(`[${time}] ${tag} ${message}`, data);
   else console.log(`[${time}] ${tag} ${message}`);
 }
 
-// --- Helper to send messages safely ---
+// --- Send Helper ---
 function sendTo(userId, messageObj) {
   const client = clients.get(userId);
   if (client && client.socket.readyState === WebSocket.OPEN) {
@@ -38,24 +39,25 @@ function sendTo(userId, messageObj) {
   }
 }
 
-// --- Heartbeat check for detecting dead sockets ---
+// --- Heartbeat Helper ---
 function heartbeat() {
   this.isAlive = true;
 }
 
-// --- WebSocket logic ---
+// --- WebSocket Logic ---
 wss.on("connection", (socket, req) => {
   const params = new URLSearchParams(url.parse(req.url).query);
-  const userId = params.get("userId");
+  const userId = params.get("_id"); // 🟩 unified naming (_id)
 
   if (!userId) {
-    logEvent("❌", "Connection rejected: missing userId");
-    socket.close(1008, "Missing userId");
+    logEvent("❌", "Connection rejected: missing _id param");
+    socket.close(1008, "Missing _id");
     return;
   }
 
+  // Handle reconnection
   if (clients.has(userId)) {
-    logEvent("♻️", `User ${userId} reconnected, replacing old connection.`);
+    logEvent("♻️", `User ${userId} reconnected — replacing old socket.`);
     const oldSocket = clients.get(userId).socket;
     try {
       oldSocket.terminate();
@@ -70,12 +72,12 @@ wss.on("connection", (socket, req) => {
 
   logEvent("✅", `User connected: ${userId}`);
 
-  // --- Incoming messages ---
+  // --- Incoming Messages ---
   socket.on("message", async (msg) => {
     try {
       const data = JSON.parse(msg);
       const type = (data.type || "").toUpperCase();
-      const targetId = data.targetUserId;
+      const targetId = data.targetUserId || data._id; // fallback for any old clients
 
       logEvent("📨", `Message from ${userId}`, { type, targetId, data });
 
@@ -83,7 +85,7 @@ wss.on("connection", (socket, req) => {
       const callee = clients.get(targetId);
 
       if (!targetId) {
-        logEvent("⚠️", `No targetUserId in message from ${userId}`);
+        logEvent("⚠️", `No target ID in message from ${userId}`);
         return;
       }
 
@@ -110,17 +112,19 @@ wss.on("connection", (socket, req) => {
 
         // --- Call request ---
         case "CALL_REQUEST":
-          logEvent("📞", `Call request from ${userId} to ${targetId}`, { isVideo: data.isVideo });
+          logEvent("📞", `Call request from ${userId} to ${targetId}`, {
+            isVideo: data.isVideo,
+          });
 
           if (callee) {
-            logEvent("🟢", `${targetId} is online — sending call request via WebSocket`);
+            logEvent("🟢", `${targetId} is online — sending WebSocket call request`);
             sendTo(targetId, {
               type: "CALL_REQUEST",
               fromUserId: userId,
               isVideo: data.isVideo || false,
             });
           } else {
-            logEvent("📴", `${targetId} is offline — sending OneSignal push`);
+            logEvent("📴", `${targetId} offline — sending OneSignal push`);
             sendTo(userId, { type: "USER_BUSY", targetUserId: targetId });
 
             try {
@@ -142,7 +146,7 @@ wss.on("connection", (socket, req) => {
                 payload,
                 {
                   headers: {
-                    "Authorization": `Basic ${process.env.yenkasachatOneSignalKey}`,
+                    Authorization: `Basic ${process.env.yenkasachatOneSignalKey}`,
                     "Content-Type": "application/json",
                   },
                 }
@@ -150,7 +154,11 @@ wss.on("connection", (socket, req) => {
 
               logEvent("📨", "OneSignal push sent successfully", res.data);
             } catch (err) {
-              logEvent("❌", "OneSignal push failed", err.response?.data || err.message);
+              logEvent(
+                "❌",
+                "OneSignal push failed",
+                err.response?.data || err.message
+              );
             }
           }
           return;
@@ -175,22 +183,22 @@ wss.on("connection", (socket, req) => {
           logEvent("⚠️", `Unknown message type from ${userId}: ${type}`);
       }
 
-      // Forward signaling messages
+      // --- Forward signaling messages ---
       if (callee) {
         sendTo(targetId, { ...data, fromUserId: userId });
       }
     } catch (err) {
-      logEvent("❌", `Error parsing or forwarding message from ${userId}: ${err.message}`);
+      logEvent("❌", `Error handling message from ${userId}: ${err.message}`);
       socket.send(JSON.stringify({ type: "ERROR", message: err.message }));
     }
   });
 
-  // --- Handle WebSocket errors ---
+  // --- Handle Errors ---
   socket.on("error", (err) => {
     logEvent("💥", `WebSocket error for ${userId}: ${err.message}`);
   });
 
-  // --- Handle disconnects ---
+  // --- Handle Disconnect ---
   socket.on("close", (code, reason) => {
     const reasonStr = reason?.toString() || "No reason";
     logEvent("❌", `User disconnected: ${userId} | Code: ${code} | Reason: ${reasonStr}`);
@@ -204,7 +212,6 @@ wss.on("connection", (socket, req) => {
 
     clients.delete(userId);
 
-    // Decode WebSocket close codes for clarity
     switch (code) {
       case 1000:
         logEvent("ℹ️", `${userId} normal closure`);
@@ -221,7 +228,7 @@ wss.on("connection", (socket, req) => {
   });
 });
 
-// --- Ping clients periodically to detect dead connections ---
+// --- Ping interval (detect dead sockets) ---
 const interval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) {
@@ -235,6 +242,6 @@ const interval = setInterval(() => {
 
 wss.on("close", () => clearInterval(interval));
 
-// --- Start server ---
+// --- Start Server ---
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => logEvent("🚀", `Server running on port ${PORT}`));
