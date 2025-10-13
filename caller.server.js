@@ -1,4 +1,3 @@
-// caller.server.js
 require('dotenv').config();
 const express = require("express");
 const bodyParser = require("body-parser");
@@ -6,7 +5,7 @@ const http = require("http");
 const WebSocket = require("ws");
 const url = require("url");
 const path = require("path");
-const axios = require("axios"); // ✅ for OneSignal requests
+const axios = require("axios");
 
 // --- Create Express app for API routes ---
 const app = express();
@@ -22,12 +21,26 @@ const wss = new WebSocket.Server({ server });
 
 const clients = new Map(); // userId -> { socket, inCallWith }
 
-// Helper to send messages to a specific user
+// --- Helper for consistent logging ---
+function logEvent(tag, message, data) {
+  const time = new Date().toISOString();
+  if (data) console.log(`[${time}] ${tag} ${message}`, data);
+  else console.log(`[${time}] ${tag} ${message}`);
+}
+
+// --- Helper to send messages safely ---
 function sendTo(userId, messageObj) {
   const client = clients.get(userId);
   if (client && client.socket.readyState === WebSocket.OPEN) {
     client.socket.send(JSON.stringify(messageObj));
+  } else {
+    logEvent("⚠️", `Cannot send to ${userId}, socket not open`);
   }
+}
+
+// --- Heartbeat check for detecting dead sockets ---
+function heartbeat() {
+  this.isAlive = true;
 }
 
 // --- WebSocket logic ---
@@ -36,31 +49,46 @@ wss.on("connection", (socket, req) => {
   const userId = params.get("userId");
 
   if (!userId) {
+    logEvent("❌", "Connection rejected: missing userId");
     socket.close(1008, "Missing userId");
     return;
   }
 
   if (clients.has(userId)) {
-    console.log(`User ${userId} reconnected, replacing old connection.`);
-    clients.get(userId).socket.close();
+    logEvent("♻️", `User ${userId} reconnected, replacing old connection.`);
+    const oldSocket = clients.get(userId).socket;
+    try {
+      oldSocket.terminate();
+    } catch (e) {
+      logEvent("⚠️", `Error terminating old socket for ${userId}: ${e.message}`);
+    }
   }
 
+  socket.isAlive = true;
+  socket.on("pong", heartbeat);
   clients.set(userId, { socket, inCallWith: null });
-  console.log(`✅ User connected: ${userId}`);
 
-  // --- Handle incoming messages ---
+  logEvent("✅", `User connected: ${userId}`);
+
+  // --- Incoming messages ---
   socket.on("message", async (msg) => {
     try {
       const data = JSON.parse(msg);
       const type = (data.type || "").toUpperCase();
       const targetId = data.targetUserId;
+
+      logEvent("📨", `Message from ${userId}`, { type, targetId, data });
+
       const caller = clients.get(userId);
       const callee = clients.get(targetId);
 
-      if (!targetId) return;
+      if (!targetId) {
+        logEvent("⚠️", `No targetUserId in message from ${userId}`);
+        return;
+      }
 
       switch (type) {
-        // WebRTC Signaling messages
+        // --- WebRTC core signaling ---
         case "OFFER":
           if (callee?.inCallWith && callee.inCallWith !== userId) {
             sendTo(userId, { type: "USER_BUSY", fromUserId: targetId });
@@ -72,40 +100,33 @@ wss.on("connection", (socket, req) => {
 
         case "ANSWER":
         case "CANDIDATE":
-          // Forward directly
           break;
 
         case "CALL_ENDED":
+          logEvent("📞", `Call ended by ${userId}`);
           if (caller) caller.inCallWith = null;
           if (callee) callee.inCallWith = null;
           break;
 
-        // --- 📞 New signaling for call request ---
+        // --- Call request ---
         case "CALL_REQUEST":
-          console.log(`📞 Call request from ${userId} to ${targetId}`);
+          logEvent("📞", `Call request from ${userId} to ${targetId}`, { isVideo: data.isVideo });
 
           if (callee) {
-            // Receiver is online (connected via WebSocket)
+            logEvent("🟢", `${targetId} is online — sending call request via WebSocket`);
             sendTo(targetId, {
               type: "CALL_REQUEST",
               fromUserId: userId,
               isVideo: data.isVideo || false,
             });
           } else {
-            // Receiver is offline → trigger OneSignal push notification
-            console.log(`📴 ${targetId} is offline. Sending OneSignal push...`);
+            logEvent("📴", `${targetId} is offline — sending OneSignal push`);
+            sendTo(userId, { type: "USER_BUSY", targetUserId: targetId });
 
-            // Notify caller user that receiver is busy/offline
-            sendTo(userId, {
-              type: "USER_BUSY",
-              targetUserId: targetId,
-            });
-
-            // 🔔 Send OneSignal push
             try {
               const payload = {
                 app_id: process.env.ONESIGNAL_APP_ID,
-                include_external_user_ids: [targetId], // assuming userId = OneSignal external ID
+                include_external_user_ids: [targetId],
                 headings: { en: "Incoming Call" },
                 contents: { en: `User ${userId} is calling you.` },
                 data: {
@@ -127,63 +148,93 @@ wss.on("connection", (socket, req) => {
                 }
               );
 
-              console.log("📨 OneSignal push sent:", res.data.id);
+              logEvent("📨", "OneSignal push sent successfully", res.data);
             } catch (err) {
-              console.error("❌ OneSignal push failed:", err.message);
+              logEvent("❌", "OneSignal push failed", err.response?.data || err.message);
             }
-          }
-          return; // stop further forwarding
-
-        // --- ✅ Call accepted ---
-        case "CALL_ACCEPT":
-          console.log(`✅ ${userId} accepted call from ${targetId}`);
-          if (callee) {
-            sendTo(targetId, {
-              type: "CALL_ACCEPT",
-              fromUserId: userId,
-            });
           }
           return;
 
-        // --- ❌ Call rejected ---
-        case "CALL_REJECT":
-          console.log(`❌ ${userId} rejected call from ${targetId}`);
+        // --- Call accepted ---
+        case "CALL_ACCEPT":
+          logEvent("✅", `${userId} accepted call from ${targetId}`);
           if (callee) {
-            sendTo(targetId, {
-              type: "CALL_REJECT",
-              fromUserId: userId,
-            });
+            sendTo(targetId, { type: "CALL_ACCEPT", fromUserId: userId });
+          }
+          return;
+
+        // --- Call rejected ---
+        case "CALL_REJECT":
+          logEvent("🚫", `${userId} rejected call from ${targetId}`);
+          if (callee) {
+            sendTo(targetId, { type: "CALL_REJECT", fromUserId: userId });
           }
           return;
 
         default:
-          console.log(`⚠️ Unknown message type: ${type}`);
+          logEvent("⚠️", `Unknown message type from ${userId}: ${type}`);
       }
 
-      // Forward all other known signaling messages (offer, answer, candidate)
+      // Forward signaling messages
       if (callee) {
         sendTo(targetId, { ...data, fromUserId: userId });
       }
-
     } catch (err) {
-      console.error("❌ Error parsing message:", err);
+      logEvent("❌", `Error parsing or forwarding message from ${userId}: ${err.message}`);
       socket.send(JSON.stringify({ type: "ERROR", message: err.message }));
     }
   });
 
+  // --- Handle WebSocket errors ---
+  socket.on("error", (err) => {
+    logEvent("💥", `WebSocket error for ${userId}: ${err.message}`);
+  });
+
   // --- Handle disconnects ---
-  socket.on("close", () => {
-    console.log(`❌ User disconnected: ${userId}`);
+  socket.on("close", (code, reason) => {
+    const reasonStr = reason?.toString() || "No reason";
+    logEvent("❌", `User disconnected: ${userId} | Code: ${code} | Reason: ${reasonStr}`);
+
     const callPartner = clients.get(userId)?.inCallWith;
     if (callPartner) {
       sendTo(callPartner, { type: "USER_LEFT", fromUserId: userId });
       const partner = clients.get(callPartner);
       if (partner) partner.inCallWith = null;
     }
+
     clients.delete(userId);
+
+    // Decode WebSocket close codes for clarity
+    switch (code) {
+      case 1000:
+        logEvent("ℹ️", `${userId} normal closure`);
+        break;
+      case 1001:
+        logEvent("📱", `${userId} closed app or navigated away`);
+        break;
+      case 1006:
+        logEvent("⚠️", `${userId} abnormal disconnect (network loss?)`);
+        break;
+      default:
+        logEvent("🌀", `${userId} disconnected with code ${code}`);
+    }
   });
 });
 
+// --- Ping clients periodically to detect dead connections ---
+const interval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (!ws.isAlive) {
+      logEvent("💀", "Terminating dead socket");
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+wss.on("close", () => clearInterval(interval));
+
 // --- Start server ---
 const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+server.listen(PORT, () => logEvent("🚀", `Server running on port ${PORT}`));
