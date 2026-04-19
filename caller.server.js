@@ -39,6 +39,18 @@ function sendTo(userId, messageObj) {
   }
 }
 
+function buildCallRequestPayload(fromUserId, data) {
+  return {
+    type: "CALL_REQUEST",
+    fromUserId,
+    isVideo: data.isVideo || false,
+    callerName: data.callerName || "Unknown",
+    callerPhoto: data.callerPhoto || "",
+    roomUrl: data.roomUrl || "",
+    token: data.token || "",
+  };
+}
+
 // --- Heartbeat Helper ---
 function heartbeat() {
   this.isAlive = true;
@@ -77,7 +89,7 @@ wss.on("connection", (socket, req) => {
     try {
       const data = JSON.parse(msg);
       const type = (data.type || "").toUpperCase();
-      const targetId = data.targetUserId || data._id; // fallback for any old clients
+      const targetId = data.targetUserId || data.toUserId || data._id; // fallback for old/new clients
 
       logEvent("📨", `Message from ${userId}`, { type, targetId, data });
 
@@ -116,27 +128,30 @@ wss.on("connection", (socket, req) => {
             isVideo: data.isVideo,
           });
 
+          const callRequestPayload = buildCallRequestPayload(userId, data);
+
           if (callee) {
             logEvent("🟢", `${targetId} is online — sending WebSocket call request`);
-            sendTo(targetId, {
-              type: "CALL_REQUEST",
-              fromUserId: userId,
-              isVideo: data.isVideo || false,
-            });
+            sendTo(targetId, callRequestPayload);
           } else {
             logEvent("📴", `${targetId} offline — sending OneSignal push`);
-            sendTo(userId, { type: "USER_BUSY", targetUserId: targetId });
+            sendTo(userId, { type: "CALL_PUSH_SENT", targetUserId: targetId });
 
             try {
               const payload = {
                 app_id: process.env.ONESIGNAL_APP_ID,
                 include_external_user_ids: [targetId],
                 headings: { en: "Incoming Call" },
-                contents: { en: `User ${userId} is calling you.` },
+                contents: { en: `${callRequestPayload.callerName} is calling you.` },
                 data: {
                   type: "call_request",
                   fromUserId: userId,
+                  callerId: userId,
+                  callerName: callRequestPayload.callerName,
+                  callerPhoto: callRequestPayload.callerPhoto,
                   isVideo: data.isVideo || false,
+                  roomUrl: callRequestPayload.roomUrl,
+                  token: callRequestPayload.token,
                 },
                 android_channel_id: process.env.ONESIGNAL_CHANNEL_ID || null,
               };
@@ -163,11 +178,29 @@ wss.on("connection", (socket, req) => {
           }
           return;
 
+        // --- Call accepted with room credentials ---
+        case "CALL_ACCEPT_WITH_ROOM":
+          logEvent("✅", `${userId} accepted call with room for ${targetId}`);
+          if (callee) {
+            sendTo(targetId, {
+              type: "CALL_ACCEPT_WITH_ROOM",
+              fromUserId: userId,
+              roomUrl: data.roomUrl || "",
+              token: data.token || "",
+            });
+          }
+          return;
+
         // --- Call accepted ---
         case "CALL_ACCEPT":
           logEvent("✅", `${userId} accepted call from ${targetId}`);
           if (callee) {
-            sendTo(targetId, { type: "CALL_ACCEPT", fromUserId: userId });
+            sendTo(targetId, {
+              type: "CALL_ACCEPT",
+              fromUserId: userId,
+              roomUrl: data.roomUrl || "",
+              token: data.token || "",
+            });
           }
           return;
 
