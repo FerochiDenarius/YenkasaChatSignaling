@@ -42,10 +42,13 @@ function sendTo(userId, messageObj) {
 }
 
 function buildCallRequestPayload(fromUserId, data) {
+  const callType = data.callType || (data.isVideo === false ? "audio" : "video");
+
   return {
     type: "CALL_REQUEST",
     fromUserId,
-    isVideo: data.isVideo || false,
+    isVideo: data.isVideo === undefined ? callType === "video" : data.isVideo || false,
+    callType,
     callerName: data.callerName || "Unknown",
     callerPhoto: data.callerPhoto || "",
     roomUrl: data.roomUrl || "",
@@ -151,7 +154,8 @@ wss.on("connection", (socket, req) => {
                   callerId: userId,
                   callerName: callRequestPayload.callerName,
                   callerPhoto: callRequestPayload.callerPhoto,
-                  isVideo: data.isVideo || false,
+                  isVideo: callRequestPayload.isVideo,
+                  callType: callRequestPayload.callType,
                   roomUrl: callRequestPayload.roomUrl,
                   token: callRequestPayload.token,
                 },
