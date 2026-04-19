@@ -13,7 +13,9 @@ app.use(bodyParser.json());
 
 // --- Daily.co routes ---
 const dailycoRoutes = require("./routes/dailyco.routes.js");
+const datacallRoutes = require("./datacall.routes.js");
 app.use("/api/dailyco", dailycoRoutes);
+app.use("/api/datacall", datacallRoutes);
 
 // --- HTTP + WebSocket Server ---
 const server = http.createServer(app);
